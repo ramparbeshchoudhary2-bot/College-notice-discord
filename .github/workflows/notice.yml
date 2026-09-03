@@ -16,6 +16,10 @@ jobs:
       - name: Get repository files
         uses: actions/checkout@v4
 
+      - name: Install Python packages
+        run: |
+          pip install requests beautifulsoup4
+
       - name: Check for new college notice
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
@@ -25,7 +29,6 @@ jobs:
           from bs4 import BeautifulSoup
           import os
           import json
-          import re
 
           PAGE = "https://www.suryasencollege.org.in/new_2020_GeneralNotice.php"
           STATE = "last_notice.txt"
@@ -34,18 +37,14 @@ jobs:
           html = requests.get(PAGE, timeout=30).text
           soup = BeautifulSoup(html, "html.parser")
 
-          # Find notice links
           notices = []
 
           for a in soup.find_all("a", href=True):
               text = a.get_text(" ", strip=True)
               href = a["href"]
 
-              if "click to view" in text.lower() or href.lower().endswith(".pdf"):
-                  if href.lower().endswith(".pdf"):
-                      url = href
-                  else:
-                      url = href
+              if href.lower().endswith(".pdf"):
+                  url = href
 
                   if url.startswith("/"):
                       url = "https://www.suryasencollege.org.in" + url
@@ -58,7 +57,6 @@ jobs:
               print("No PDF notices found.")
               raise SystemExit
 
-          # First notice on the page is treated as newest
           title, pdf_url = notices[0]
 
           print("Newest notice:", title)
@@ -68,44 +66,46 @@ jobs:
           if os.path.exists(STATE):
               old = open(STATE).read().strip()
 
-          # First run: save current notice without sending it
           if not old:
               open(STATE, "w").write(pdf_url)
-              print("Initial notice saved. No Discord message sent.")
+              print("Initial notice saved.")
               raise SystemExit
 
-          # Nothing new
           if pdf_url == old:
               print("No new notice.")
               raise SystemExit
 
-          # Download PDF
           r = requests.get(pdf_url, timeout=60)
           r.raise_for_status()
 
           filename = pdf_url.split("/")[-1].split("?")[0]
+
           if not filename.lower().endswith(".pdf"):
               filename = "college_notice.pdf"
 
           open(filename, "wb").write(r.content)
 
-          # Send PDF to Discord
           message = {
-              "content": "@everyone\n📢 **NEW COLLEGE NOTICE**\n**" +
-                         title.replace("click to view", "").strip() + "**"
+              "content": "@everyone\n📢 **NEW COLLEGE NOTICE**\n" +
+                         title.strip()
           }
 
           with open(filename, "rb") as f:
               response = requests.post(
                   WEBHOOK,
                   data={"payload_json": json.dumps(message)},
-                  files={"files[0]": (filename, f, "application/pdf")},
+                  files={
+                      "files[0]": (
+                          filename,
+                          f,
+                          "application/pdf"
+                      )
+                  },
                   timeout=60
               )
 
           response.raise_for_status()
 
-          # Save new notice
           open(STATE, "w").write(pdf_url)
 
           print("PDF successfully sent to Discord.")
