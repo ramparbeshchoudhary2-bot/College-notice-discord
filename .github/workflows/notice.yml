@@ -16,7 +16,7 @@ jobs:
       - name: Get repository files
         uses: actions/checkout@v5
 
-      - name: Install OCR tools
+      - name: Install required packages
         run: |
           sudo apt-get update
           sudo apt-get install -y poppler-utils tesseract-ocr
@@ -41,9 +41,9 @@ jobs:
           STATE = "last_notice.txt"
           WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 
-          # ==========================================
+          # -----------------------------------------
           # CONNECT TO COLLEGE WEBSITE
-          # ==========================================
+          # -----------------------------------------
 
           html = None
 
@@ -51,17 +51,16 @@ jobs:
               try:
                   print(f"Connecting to college website: {attempt}/5")
 
-                  response = requests.get(
+                  r = requests.get(
                       PAGE,
                       headers={
-                          "User-Agent":
-                          "Mozilla/5.0 (College Notice Monitor)"
+                          "User-Agent": "Mozilla/5.0"
                       },
                       timeout=60
                   )
 
-                  response.raise_for_status()
-                  html = response.text
+                  r.raise_for_status()
+                  html = r.text
 
                   print("Website connected successfully.")
                   break
@@ -73,143 +72,60 @@ jobs:
                       time.sleep(attempt * 10)
 
           if html is None:
-              print("College website could not be reached.")
+              print("Could not connect to college website.")
               raise SystemExit(1)
 
-          # ==========================================
-          # FIND NOTICE PDFS
-          # ==========================================
+          # -----------------------------------------
+          # FIND PDF NOTICES
+          # -----------------------------------------
 
           soup = BeautifulSoup(html, "html.parser")
           notices = []
 
-          heading = None
+          for a in soup.find_all("a", href=True):
 
-          for tag in soup.find_all(
-              ["h1", "h2", "h3", "h4", "h5", "h6"]
-          ):
-              if "GENERAL NOTICE" in tag.get_text(
-                  " ",
-                  strip=True
-              ).upper():
-                  heading = tag
-                  break
+              text = a.get_text(" ", strip=True)
+              href = a.get("href", "").strip()
 
-          if heading:
-              print("GENERAL NOTICE section found.")
+              if ".pdf" not in href.lower():
+                  continue
 
-              for element in heading.find_all_next(
-                  "a",
-                  href=True
-              ):
+              pdf_url = urljoin(PAGE, href)
 
-                  text = element.get_text(
-                      " ",
-                      strip=True
-                  )
+              date_match = re.search(
+                  r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})',
+                  text
+              )
 
-                  href = element.get(
-                      "href",
-                      ""
-                  ).strip()
+              if not date_match:
+                  continue
 
-                  if not href:
-                      continue
+              date_text = date_match.group(0)
 
-                  if ".pdf" not in href.lower():
-                      continue
-
-                  pdf_url = urljoin(PAGE, href)
-
-                  # Notice dates on the website
-                  match = re.search(
-                      r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})',
-                      text
-                  )
-
-                  if not match:
-                      continue
-
-                  date_text = match.group(0)
-
-                  notices.append(
-                      (
-                          date_text,
-                          text,
-                          pdf_url
-                      )
-                  )
-
-                  if len(notices) >= 30:
-                      break
-
-          # ==========================================
-          # FALLBACK
-          # ==========================================
-
-          if not notices:
-
-              print("GENERAL NOTICE section not detected.")
-              print("Trying fallback PDF search...")
-
-              for a in soup.find_all(
-                  "a",
-                  href=True
-              ):
-
-                  text = a.get_text(
-                      " ",
-                      strip=True
-                  )
-
-                  href = a.get(
-                      "href",
-                      ""
-                  ).strip()
-
-                  if ".pdf" not in href.lower():
-                      continue
-
-                  match = re.search(
-                      r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})',
-                      text
-                  )
-
-                  if not match:
-                      continue
-
-                  pdf_url = urljoin(PAGE, href)
-
-                  notices.append(
-                      (
-                          match.group(0),
-                          text,
-                          pdf_url
-                      )
-                  )
+              notices.append(
+                  (date_text, text, pdf_url)
+              )
 
           if not notices:
               print("No PDF notices found.")
               raise SystemExit(1)
 
-          # ==========================================
-          # LATEST NOTICE
-          # ==========================================
+          # -----------------------------------------
+          # COLLEGE PAGE LISTS NEWEST NOTICE FIRST
+          # -----------------------------------------
 
           date_text, title, pdf_url = notices[0]
 
           print("")
-          print("====================================")
-          print("LATEST COLLEGE NOTICE")
+          print("LATEST NOTICE")
           print("Date:", date_text)
           print("Title:", title)
           print("PDF:", pdf_url)
-          print("====================================")
           print("")
 
-          # ==========================================
+          # -----------------------------------------
           # CHECK PREVIOUS NOTICE
-          # ==========================================
+          # -----------------------------------------
 
           old = ""
 
@@ -217,63 +133,43 @@ jobs:
               with open(STATE, "r") as f:
                   old = f.read().strip()
 
-          if not old:
-
-              with open(STATE, "w") as f:
-                  f.write(pdf_url)
-
-              print("First run completed.")
-              print("Current notice saved without sending.")
-
-              raise SystemExit(0)
-
-          if pdf_url == old:
-
+          if old == pdf_url:
               print("No new notice.")
               raise SystemExit(0)
 
           print("NEW NOTICE FOUND!")
 
-          # ==========================================
+          # -----------------------------------------
           # DOWNLOAD PDF
-          # ==========================================
+          # -----------------------------------------
 
           pdf_data = None
 
           for attempt in range(1, 6):
-
               try:
+                  print(f"Downloading PDF: {attempt}/5")
 
-                  print(
-                      f"Downloading PDF: {attempt}/5"
-                  )
-
-                  pdf_response = requests.get(
+                  r = requests.get(
                       pdf_url,
                       headers={
-                          "User-Agent":
-                          "Mozilla/5.0 (College Notice Monitor)"
+                          "User-Agent": "Mozilla/5.0"
                       },
                       timeout=90
                   )
 
-                  pdf_response.raise_for_status()
-
-                  pdf_data = pdf_response.content
+                  r.raise_for_status()
+                  pdf_data = r.content
 
                   print(
-                      f"PDF downloaded: "
-                      f"{len(pdf_data)} bytes"
+                      "PDF downloaded:",
+                      len(pdf_data),
+                      "bytes"
                   )
 
                   break
 
               except Exception as e:
-
-                  print(
-                      "PDF download error:",
-                      e
-                  )
+                  print("PDF download error:", e)
 
                   if attempt < 5:
                       time.sleep(attempt * 10)
@@ -281,10 +177,6 @@ jobs:
           if pdf_data is None:
               print("Could not download PDF.")
               raise SystemExit(1)
-
-          # ==========================================
-          # SAVE PDF
-          # ==========================================
 
           filename = pdf_url.split("/")[-1]
           filename = filename.split("?")[0]
@@ -295,47 +187,43 @@ jobs:
           with open(filename, "wb") as f:
               f.write(pdf_data)
 
-          print("PDF saved:", filename)
+          print("PDF saved as:", filename)
 
-          # ==========================================
-          # OCR THE SCANNED PDF
-          # ==========================================
+          # -----------------------------------------
+          # OCR
+          # -----------------------------------------
 
           notice_number = "Not detected"
 
           try:
-
               print("")
               print("Starting OCR...")
-              print("Converting PDF pages to images...")
 
-              # Convert first 5 pages to high-resolution PNG
+              prefix = "notice_page"
+
               subprocess.run(
                   [
                       "pdftoppm",
-                      "-f",
-                      "1",
-                      "-l",
-                      "5",
-                      "-r",
-                      "300",
+                      "-f", "1",
+                      "-l", "5",
+                      "-r", "300",
                       "-png",
                       filename,
-                      "notice_page"
+                      prefix
                   ],
                   check=True
               )
 
               images = sorted(
-                  glob.glob("notice_page-*.png")
+                  glob.glob(prefix + "-*.png")
               )
 
               print(
-                  "Pages converted:",
+                  "PDF pages converted:",
                   len(images)
               )
 
-              all_ocr_text = ""
+              ocr_text = ""
 
               for image in images:
 
@@ -344,25 +232,63 @@ jobs:
                       image
                   )
 
+                  result = subprocess.run(
+                      [
+                          "tesseract",
+                          image,
+                          "stdout",
+                          "--psm",
+                          "6"
+                      ],
+                      capture_output=True,
+                      text=True
+                  )
+
+                  page_text = result.stdout
+
+                  ocr_text += "\n" + page_text
+
+                  print(
+                      "OCR text:",
+                      page_text[:1000]
+                  )
+
+              # -------------------------------------
+              # FIND NOTICE NUMBER
+              # -------------------------------------
+
+              patterns = [
+                  r'Notice\s*No\.?\s*[:\-]?\s*(\d{1,4})',
+                  r'Notice\s*Number\s*[:\-]?\s*(\d{1,4})',
+                  r'NOTICE\s*NO\.?\s*[:\-]?\s*(\d{1,4})',
+                  r'NO\.?\s*[:\-]\s*(\d{1,4})'
+              ]
+
+              for pattern in patterns:
+
+                  match = re.search(
+                      pattern,
+                      ocr_text,
+                      re.IGNORECASE
+                  )
+
+                  if match:
+                      notice_number = match.group(1)
+                      break
+
+              print(
+                  "Detected Notice Number:",
+                  notice_number
+              )
+
+              # Delete temporary images
+
+              for image in images:
                   try:
+                      os.remove(image)
+                  except:
+                      pass
 
-                      result = subprocess.run(
-                          [
-                              "tesseract",
-                              image,
-                              "stdout",
-                              "--psm",
-                              "6"
-                          ],
-                          capture_output=True,
-                          text=True
-                      )
-
-                      text = result.stdout
-
-                      all_ocr_text += "\n" + text
-
-                      print(
-                          "OCR result:"
-                      )
-                     
+          except Exception as e:
+              print("OCR error:", e)
+              print("Continuing without
