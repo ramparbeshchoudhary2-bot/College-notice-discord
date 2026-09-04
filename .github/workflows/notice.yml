@@ -16,9 +16,11 @@ jobs:
       - name: Get repository files
         uses: actions/checkout@v5
 
-      - name: Install Python packages
+      - name: Install OCR tools
         run: |
-          pip install requests beautifulsoup4 pypdf
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils tesseract-ocr
+          pip install requests beautifulsoup4
 
       - name: Check for new college notice
         env:
@@ -32,14 +34,16 @@ jobs:
           import json
           import time
           import re
+          import subprocess
+          import glob
 
           PAGE = "https://www.suryasencollege.org.in/new_2020_GeneralNotice.php"
           STATE = "last_notice.txt"
           WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 
-          # =====================================
+          # ==========================================
           # CONNECT TO COLLEGE WEBSITE
-          # =====================================
+          # ==========================================
 
           html = None
 
@@ -66,23 +70,19 @@ jobs:
                   print("Connection error:", e)
 
                   if attempt < 5:
-                      wait = attempt * 10
-                      print(f"Waiting {wait} seconds...")
-                      time.sleep(wait)
+                      time.sleep(attempt * 10)
 
           if html is None:
               print("College website could not be reached.")
               raise SystemExit(1)
 
-          # =====================================
-          # PARSE WEBSITE
-          # =====================================
+          # ==========================================
+          # FIND NOTICE PDFS
+          # ==========================================
 
           soup = BeautifulSoup(html, "html.parser")
-
           notices = []
 
-          # Find GENERAL NOTICE heading
           heading = None
 
           for tag in soup.find_all(
@@ -116,16 +116,12 @@ jobs:
                   if not href:
                       continue
 
-                  # Only PDF links
                   if ".pdf" not in href.lower():
                       continue
 
-                  pdf_url = urljoin(
-                      PAGE,
-                      href
-                  )
+                  pdf_url = urljoin(PAGE, href)
 
-                  # Look for date in link text
+                  # Notice dates on the website
                   match = re.search(
                       r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})',
                       text
@@ -147,15 +143,14 @@ jobs:
                   if len(notices) >= 30:
                       break
 
-          # =====================================
-          # FALLBACK SEARCH
-          # =====================================
+          # ==========================================
+          # FALLBACK
+          # ==========================================
 
           if not notices:
 
-              print(
-                  "GENERAL NOTICE section not detected."
-              )
+              print("GENERAL NOTICE section not detected.")
+              print("Trying fallback PDF search...")
 
               for a in soup.find_all(
                   "a",
@@ -183,10 +178,7 @@ jobs:
                   if not match:
                       continue
 
-                  pdf_url = urljoin(
-                      PAGE,
-                      href
-                  )
+                  pdf_url = urljoin(PAGE, href)
 
                   notices.append(
                       (
@@ -200,9 +192,9 @@ jobs:
               print("No PDF notices found.")
               raise SystemExit(1)
 
-          # =====================================
+          # ==========================================
           # LATEST NOTICE
-          # =====================================
+          # ==========================================
 
           date_text, title, pdf_url = notices[0]
 
@@ -215,38 +207,26 @@ jobs:
           print("====================================")
           print("")
 
-          # =====================================
+          # ==========================================
           # CHECK PREVIOUS NOTICE
-          # =====================================
+          # ==========================================
 
           old = ""
 
           if os.path.exists(STATE):
-              with open(
-                  STATE,
-                  "r"
-              ) as f:
+              with open(STATE, "r") as f:
                   old = f.read().strip()
 
-          # First run
           if not old:
 
-              with open(
-                  STATE,
-                  "w"
-              ) as f:
+              with open(STATE, "w") as f:
                   f.write(pdf_url)
 
-              print(
-                  "First run completed."
-              )
-              print(
-                  "Current notice saved without sending."
-              )
+              print("First run completed.")
+              print("Current notice saved without sending.")
 
               raise SystemExit(0)
 
-          # Already sent
           if pdf_url == old:
 
               print("No new notice.")
@@ -254,9 +234,9 @@ jobs:
 
           print("NEW NOTICE FOUND!")
 
-          # =====================================
+          # ==========================================
           # DOWNLOAD PDF
-          # =====================================
+          # ==========================================
 
           pdf_data = None
 
@@ -296,207 +276,93 @@ jobs:
                   )
 
                   if attempt < 5:
-                      time.sleep(
-                          attempt * 10
-                      )
+                      time.sleep(attempt * 10)
 
           if pdf_data is None:
-
-              print(
-                  "Could not download PDF."
-              )
-
+              print("Could not download PDF.")
               raise SystemExit(1)
 
-          # =====================================
+          # ==========================================
           # SAVE PDF
-          # =====================================
+          # ==========================================
 
           filename = pdf_url.split("/")[-1]
-
           filename = filename.split("?")[0]
 
           if not filename.lower().endswith(".pdf"):
               filename = "college_notice.pdf"
 
-          with open(
-              filename,
-              "wb"
-          ) as f:
-
+          with open(filename, "wb") as f:
               f.write(pdf_data)
 
-          print(
-              "PDF saved as:",
-              filename
-          )
+          print("PDF saved:", filename)
 
-          # =====================================
-          # READ NOTICE NUMBER FROM PDF
-          # =====================================
+          # ==========================================
+          # OCR THE SCANNED PDF
+          # ==========================================
 
-          notice_number = "Not found"
+          notice_number = "Not detected"
 
           try:
 
-              from pypdf import PdfReader
-
-              reader = PdfReader(
-                  filename
-              )
-
-              pdf_text = ""
-
-              for page in reader.pages:
-
-                  text = page.extract_text()
-
-                  if text:
-                      pdf_text += text + "\n"
-
               print("")
-              print("Reading PDF text...")
-              print(pdf_text[:2000])
+              print("Starting OCR...")
+              print("Converting PDF pages to images...")
 
-              # Handles examples such as:
-              #
-              # Notice No. 55
-              # Notice No: 55
-              # Notice No - 55
-              # Notice Number 55
-              # NOTICE NO. 55
-
-              match = re.search(
-                  r'Notice\s*(?:No\.?|Number)\s*[:\-]?\s*(\d+)',
-                  pdf_text,
-                  re.IGNORECASE
+              # Convert first 5 pages to high-resolution PNG
+              subprocess.run(
+                  [
+                      "pdftoppm",
+                      "-f",
+                      "1",
+                      "-l",
+                      "5",
+                      "-r",
+                      "300",
+                      "-png",
+                      filename,
+                      "notice_page"
+                  ],
+                  check=True
               )
 
-              if match:
-
-                  notice_number = match.group(1)
-
-                  print(
-                      "Notice Number found:",
-                      notice_number
-                  )
-
-              else:
-
-                  # Additional search for
-                  # "No. 55" style formatting
-
-                  match = re.search(
-                      r'\bNo\.?\s*[:\-]?\s*(\d+)\b',
-                      pdf_text,
-                      re.IGNORECASE
-                  )
-
-                  if match:
-
-                      notice_number = match.group(1)
-
-                      print(
-                          "Notice Number found:",
-                          notice_number
-                      )
-
-                  else:
-
-                      print(
-                          "Notice Number not found."
-                      )
-
-          except Exception as e:
+              images = sorted(
+                  glob.glob("notice_page-*.png")
+              )
 
               print(
-                  "PDF text extraction error:",
-                  e
+                  "Pages converted:",
+                  len(images)
               )
 
-          # =====================================
-          # SEND TO DISCORD
-          # =====================================
+              all_ocr_text = ""
 
-          message = {
+              for image in images:
 
-              "content":
-                  "@everyone\n"
-                  "📢 **NEW COLLEGE NOTICE**\n"
-                  f"🔢 **Notice No.: {notice_number}**\n"
-                  f"📅 **Date: {date_text}**\n"
-                  f"📄 **{title}**",
+                  print(
+                      "Running OCR on:",
+                      image
+                  )
 
-              "allowed_mentions": {
-                  "parse": ["everyone"]
-              }
-          }
+                  try:
 
-          print("")
-          print(
-              "Sending notice to Discord..."
-          )
-
-          with open(
-              filename,
-              "rb"
-          ) as f:
-
-              discord_response = requests.post(
-
-                  WEBHOOK,
-
-                  data={
-                      "payload_json":
-                      json.dumps(message)
-                  },
-
-                  files={
-                      "files[0]": (
-                          filename,
-                          f,
-                          "application/pdf"
+                      result = subprocess.run(
+                          [
+                              "tesseract",
+                              image,
+                              "stdout",
+                              "--psm",
+                              "6"
+                          ],
+                          capture_output=True,
+                          text=True
                       )
-                  },
 
-                  timeout=120
-              )
+                      text = result.stdout
 
-          discord_response.raise_for_status()
+                      all_ocr_text += "\n" + text
 
-          print(
-              "SUCCESS!"
-          )
-
-          print(
-              "PDF successfully sent to Discord."
-          )
-
-          # =====================================
-          # SAVE CURRENT NOTICE
-          # =====================================
-
-          with open(
-              STATE,
-              "w"
-          ) as f:
-
-              f.write(pdf_url)
-
-          print(
-              "Notice state updated."
-          )
-
-          PY
-
-      - name: Save notice state
-        run: |
-          git config user.name "College Notice Bot"
-          git config user.email "actions@github.com"
-
-          git add last_notice.txt
-
-          git diff --cached --quiet || \
-            git commit -m "Update latest college notice"
-
-          git push
+                      print(
+                          "OCR result:"
+                      )
+                     
