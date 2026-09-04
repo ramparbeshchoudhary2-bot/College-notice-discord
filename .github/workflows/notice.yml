@@ -28,141 +28,186 @@ jobs:
           import requests
           from bs4 import BeautifulSoup
           from urllib.parse import urljoin
-          from datetime import datetime
           import os
           import json
-          import re
           import time
+          import re
 
           PAGE = "https://www.suryasencollege.org.in/new_2020_GeneralNotice.php"
           STATE = "last_notice.txt"
           WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 
-          # ---------------------------------------
-          # GET COLLEGE PAGE WITH RETRIES
-          # ---------------------------------------
+          # -----------------------------
+          # GET COLLEGE WEBSITE
+          # -----------------------------
 
           html = None
 
           for attempt in range(1, 6):
               try:
-                  print(f"Website attempt {attempt}/5")
+                  print(f"Connecting to college website: {attempt}/5")
 
-                  headers = {
-                      "User-Agent": "Mozilla/5.0 (College Notice Monitor)"
-                  }
-
-                  r = requests.get(
+                  response = requests.get(
                       PAGE,
-                      headers=headers,
+                      headers={
+                          "User-Agent":
+                          "Mozilla/5.0 (College Notice Monitor)"
+                      },
                       timeout=60
                   )
 
-                  r.raise_for_status()
-                  html = r.text
+                  response.raise_for_status()
+                  html = response.text
 
-                  print("College website reached successfully.")
+                  print("Website connected successfully.")
                   break
 
               except Exception as e:
-                  print("Connection failed:", e)
+                  print("Connection error:", e)
 
                   if attempt < 5:
-                      wait = attempt * 10
-                      print(f"Waiting {wait} seconds...")
-                      time.sleep(wait)
+                      time.sleep(attempt * 10)
 
           if html is None:
-              print("Could not reach college website after 5 attempts.")
+              print("College website could not be reached.")
               raise SystemExit(1)
 
-          # ---------------------------------------
-          # FIND PDF NOTICES
-          # ---------------------------------------
+          # -----------------------------
+          # PARSE PAGE
+          # -----------------------------
 
           soup = BeautifulSoup(html, "html.parser")
 
           notices = []
 
-          for a in soup.find_all("a", href=True):
+          # Find the heading "GENERAL NOTICE"
+          heading = None
 
-              href = a["href"].strip()
-              text = a.get_text(" ", strip=True)
+          for tag in soup.find_all(
+              ["h1", "h2", "h3", "h4", "h5", "h6"]
+          ):
+              if "GENERAL NOTICE" in tag.get_text(
+                  " ",
+                  strip=True
+              ).upper():
+                  heading = tag
+                  break
 
-              if ".pdf" not in href.lower():
-                  continue
+          if heading:
+              print("GENERAL NOTICE section found.")
 
-              pdf_url = urljoin(PAGE, href)
+              # Start from the heading and inspect
+              # following links.
+              for element in heading.find_all_next("a", href=True):
 
-              # Get surrounding text to help identify notice date/title
-              parent_text = ""
-
-              parent = a.parent
-
-              if parent:
-                  parent_text = parent.get_text(
+                  text = element.get_text(
                       " ",
                       strip=True
                   )
 
-              full_text = text + " " + parent_text
+                  href = element.get("href", "").strip()
 
-              # Look for dates such as:
-              # 03-09-2026
-              # 03/09/2026
-              # 03.09.2026
+                  if not href:
+                      continue
 
-              date_matches = re.findall(
-                  r'\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b',
-                  full_text
-              )
+                  # Stop after leaving the notice section
+                  if len(notices) >= 100:
+                      break
 
-              date_value = datetime.min
+                  # Only accept PDF links
+                  if ".pdf" not in href.lower():
+                      continue
 
-              if date_matches:
-                  try:
-                      day, month, year = date_matches[0]
+                  # Only accept links that look like
+                  # college General Notice PDFs
+                  pdf_url = urljoin(PAGE, href)
 
-                      date_value = datetime(
-                          int(year),
-                          int(month),
-                          int(day)
-                      )
-
-                  except Exception:
-                      pass
-
-              notices.append(
-                  (
-                      date_value,
-                      text,
-                      pdf_url
+                  # Extract date from the link text
+                  match = re.search(
+                      r'(\d{2})[-/.](\d{2})[-/.](\d{4})',
+                      text
                   )
-              )
+
+                  if not match:
+                      continue
+
+                  date_text = match.group(0)
+
+                  notices.append(
+                      (
+                          date_text,
+                          text,
+                          pdf_url
+                      )
+                  )
+
+                  # The first few links after the
+                  # GENERAL NOTICE heading are enough.
+                  if len(notices) >= 30:
+                      break
+
+          # -----------------------------
+          # FALLBACK
+          # -----------------------------
 
           if not notices:
-              print("No PDF notices found.")
-              raise SystemExit(0)
+              print(
+                  "Could not identify notices from "
+                  "GENERAL NOTICE section."
+              )
 
-          # ---------------------------------------
-          # SELECT NEWEST NOTICE
-          # ---------------------------------------
+              # Fallback: scan all links
+              for a in soup.find_all("a", href=True):
 
-          notices.sort(
-              key=lambda x: x[0],
-              reverse=True
-          )
+                  text = a.get_text(
+                      " ",
+                      strip=True
+                  )
 
-          notice_date, title, pdf_url = notices[0]
+                  href = a.get("href", "").strip()
 
-          print("Newest notice:")
+                  if ".pdf" not in href.lower():
+                      continue
+
+                  match = re.search(
+                      r'(\d{2})[-/.](\d{2})[-/.](\d{4})',
+                      text
+                  )
+
+                  if not match:
+                      continue
+
+                  pdf_url = urljoin(PAGE, href)
+
+                  notices.append(
+                      (
+                          match.group(0),
+                          text,
+                          pdf_url
+                      )
+                  )
+
+          if not notices:
+              print("No notices found.")
+              raise SystemExit(1)
+
+          # -----------------------------
+          # THE COLLEGE PAGE IS NEWEST FIRST
+          # -----------------------------
+
+          date_text, title, pdf_url = notices[0]
+
+          print("")
+          print("===== LATEST COLLEGE NOTICE =====")
+          print("Date:", date_text)
           print("Title:", title)
-          print("Date:", notice_date)
           print("PDF:", pdf_url)
+          print("=================================")
+          print("")
 
-          # ---------------------------------------
+          # -----------------------------
           # CHECK PREVIOUS NOTICE
-          # ---------------------------------------
+          # -----------------------------
 
           old = ""
 
@@ -170,29 +215,35 @@ jobs:
               with open(STATE, "r") as f:
                   old = f.read().strip()
 
-          # First run:
-          # save current notice without sending it
+          # FIRST RUN
+          #
+          # Save the current latest notice.
+          # Do NOT send old notices.
 
           if not old:
 
               with open(STATE, "w") as f:
                   f.write(pdf_url)
 
-              print("Initial notice saved.")
+              print(
+                  "First run completed. "
+                  "Current notice saved without sending."
+              )
+
               raise SystemExit(0)
 
-          # No new notice
+          # NO NEW NOTICE
 
           if pdf_url == old:
 
               print("No new notice.")
               raise SystemExit(0)
 
-          print("NEW NOTICE DETECTED!")
+          print("NEW NOTICE FOUND!")
 
-          # ---------------------------------------
-          # DOWNLOAD PDF WITH RETRIES
-          # ---------------------------------------
+          # -----------------------------
+          # DOWNLOAD PDF
+          # -----------------------------
 
           pdf_data = None
 
@@ -201,7 +252,7 @@ jobs:
               try:
 
                   print(
-                      f"Downloading PDF - attempt {attempt}/5"
+                      f"Downloading PDF: {attempt}/5"
                   )
 
                   pdf_response = requests.get(
@@ -217,12 +268,17 @@ jobs:
 
                   pdf_data = pdf_response.content
 
+                  print(
+                      f"PDF downloaded: "
+                      f"{len(pdf_data)} bytes"
+                  )
+
                   break
 
               except Exception as e:
 
                   print(
-                      "PDF download failed:",
+                      "PDF download error:",
                       e
                   )
 
@@ -230,19 +286,14 @@ jobs:
                       time.sleep(attempt * 10)
 
           if pdf_data is None:
-
-              print(
-                  "Could not download PDF."
-              )
-
+              print("Could not download PDF.")
               raise SystemExit(1)
 
-          # ---------------------------------------
+          # -----------------------------
           # SAVE PDF
-          # ---------------------------------------
+          # -----------------------------
 
           filename = pdf_url.split("/")[-1]
-
           filename = filename.split("?")[0]
 
           if not filename.lower().endswith(".pdf"):
@@ -251,30 +302,26 @@ jobs:
           with open(filename, "wb") as f:
               f.write(pdf_data)
 
-          print(
-              "PDF downloaded:",
-              filename
-          )
-
-          # ---------------------------------------
+          # -----------------------------
           # SEND TO DISCORD
-          # ---------------------------------------
+          # -----------------------------
 
           message = {
               "content":
                   "@everyone\n"
                   "📢 **NEW COLLEGE NOTICE**\n"
-                  f"📅 {title.strip()}",
+                  f"📅 **{date_text}**\n"
+                  f"📄 {title}",
               "allowed_mentions": {
                   "parse": ["everyone"]
               }
           }
 
-          print("Sending notice to Discord...")
+          print("Sending PDF to Discord...")
 
           with open(filename, "rb") as f:
 
-              response = requests.post(
+              discord_response = requests.post(
 
                   WEBHOOK,
 
@@ -294,15 +341,13 @@ jobs:
                   timeout=120
               )
 
-          response.raise_for_status()
+          discord_response.raise_for_status()
 
-          print(
-              "PDF successfully sent to Discord!"
-          )
+          print("SUCCESS! PDF sent to Discord.")
 
-          # ---------------------------------------
-          # SAVE NEW STATE
-          # ---------------------------------------
+          # -----------------------------
+          # SAVE NEWEST NOTICE
+          # -----------------------------
 
           with open(STATE, "w") as f:
               f.write(pdf_url)
