@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Get repository files
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Python packages
         run: |
@@ -27,73 +27,262 @@ jobs:
           python3 <<'PY'
           import requests
           from bs4 import BeautifulSoup
+          from urllib.parse import urljoin
+          from datetime import datetime
           import os
           import json
+          import re
+          import time
 
           PAGE = "https://www.suryasencollege.org.in/new_2020_GeneralNotice.php"
           STATE = "last_notice.txt"
           WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 
-          html = requests.get(PAGE, timeout=30).text
+          # ---------------------------------------
+          # GET COLLEGE PAGE WITH RETRIES
+          # ---------------------------------------
+
+          html = None
+
+          for attempt in range(1, 6):
+              try:
+                  print(f"Website attempt {attempt}/5")
+
+                  headers = {
+                      "User-Agent": "Mozilla/5.0 (College Notice Monitor)"
+                  }
+
+                  r = requests.get(
+                      PAGE,
+                      headers=headers,
+                      timeout=60
+                  )
+
+                  r.raise_for_status()
+                  html = r.text
+
+                  print("College website reached successfully.")
+                  break
+
+              except Exception as e:
+                  print("Connection failed:", e)
+
+                  if attempt < 5:
+                      wait = attempt * 10
+                      print(f"Waiting {wait} seconds...")
+                      time.sleep(wait)
+
+          if html is None:
+              print("Could not reach college website after 5 attempts.")
+              raise SystemExit(1)
+
+          # ---------------------------------------
+          # FIND PDF NOTICES
+          # ---------------------------------------
+
           soup = BeautifulSoup(html, "html.parser")
 
           notices = []
 
           for a in soup.find_all("a", href=True):
+
+              href = a["href"].strip()
               text = a.get_text(" ", strip=True)
-              href = a["href"]
 
-              if href.lower().endswith(".pdf"):
-                  url = href
+              if ".pdf" not in href.lower():
+                  continue
 
-                  if url.startswith("/"):
-                      url = "https://www.suryasencollege.org.in" + url
-                  elif url.startswith("General_Notice"):
-                      url = "https://www.suryasencollege.org.in/" + url
+              pdf_url = urljoin(PAGE, href)
 
-                  notices.append((text, url))
+              # Get surrounding text to help identify notice date/title
+              parent_text = ""
+
+              parent = a.parent
+
+              if parent:
+                  parent_text = parent.get_text(
+                      " ",
+                      strip=True
+                  )
+
+              full_text = text + " " + parent_text
+
+              # Look for dates such as:
+              # 03-09-2026
+              # 03/09/2026
+              # 03.09.2026
+
+              date_matches = re.findall(
+                  r'\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b',
+                  full_text
+              )
+
+              date_value = datetime.min
+
+              if date_matches:
+                  try:
+                      day, month, year = date_matches[0]
+
+                      date_value = datetime(
+                          int(year),
+                          int(month),
+                          int(day)
+                      )
+
+                  except Exception:
+                      pass
+
+              notices.append(
+                  (
+                      date_value,
+                      text,
+                      pdf_url
+                  )
+              )
 
           if not notices:
               print("No PDF notices found.")
-              raise SystemExit
+              raise SystemExit(0)
 
-          title, pdf_url = notices[0]
+          # ---------------------------------------
+          # SELECT NEWEST NOTICE
+          # ---------------------------------------
 
-          print("Newest notice:", title)
+          notices.sort(
+              key=lambda x: x[0],
+              reverse=True
+          )
+
+          notice_date, title, pdf_url = notices[0]
+
+          print("Newest notice:")
+          print("Title:", title)
+          print("Date:", notice_date)
           print("PDF:", pdf_url)
 
+          # ---------------------------------------
+          # CHECK PREVIOUS NOTICE
+          # ---------------------------------------
+
           old = ""
+
           if os.path.exists(STATE):
-              old = open(STATE).read().strip()
+              with open(STATE, "r") as f:
+                  old = f.read().strip()
+
+          # First run:
+          # save current notice without sending it
 
           if not old:
-              open(STATE, "w").write(pdf_url)
+
+              with open(STATE, "w") as f:
+                  f.write(pdf_url)
+
               print("Initial notice saved.")
-              raise SystemExit
+              raise SystemExit(0)
+
+          # No new notice
 
           if pdf_url == old:
+
               print("No new notice.")
-              raise SystemExit
+              raise SystemExit(0)
 
-          r = requests.get(pdf_url, timeout=60)
-          r.raise_for_status()
+          print("NEW NOTICE DETECTED!")
 
-          filename = pdf_url.split("/")[-1].split("?")[0]
+          # ---------------------------------------
+          # DOWNLOAD PDF WITH RETRIES
+          # ---------------------------------------
+
+          pdf_data = None
+
+          for attempt in range(1, 6):
+
+              try:
+
+                  print(
+                      f"Downloading PDF - attempt {attempt}/5"
+                  )
+
+                  pdf_response = requests.get(
+                      pdf_url,
+                      headers={
+                          "User-Agent":
+                          "Mozilla/5.0 (College Notice Monitor)"
+                      },
+                      timeout=90
+                  )
+
+                  pdf_response.raise_for_status()
+
+                  pdf_data = pdf_response.content
+
+                  break
+
+              except Exception as e:
+
+                  print(
+                      "PDF download failed:",
+                      e
+                  )
+
+                  if attempt < 5:
+                      time.sleep(attempt * 10)
+
+          if pdf_data is None:
+
+              print(
+                  "Could not download PDF."
+              )
+
+              raise SystemExit(1)
+
+          # ---------------------------------------
+          # SAVE PDF
+          # ---------------------------------------
+
+          filename = pdf_url.split("/")[-1]
+
+          filename = filename.split("?")[0]
 
           if not filename.lower().endswith(".pdf"):
               filename = "college_notice.pdf"
 
-          open(filename, "wb").write(r.content)
+          with open(filename, "wb") as f:
+              f.write(pdf_data)
+
+          print(
+              "PDF downloaded:",
+              filename
+          )
+
+          # ---------------------------------------
+          # SEND TO DISCORD
+          # ---------------------------------------
 
           message = {
-              "content": "@everyone\n📢 **NEW COLLEGE NOTICE**\n" +
-                         title.strip()
+              "content":
+                  "@everyone\n"
+                  "📢 **NEW COLLEGE NOTICE**\n"
+                  f"📅 {title.strip()}",
+              "allowed_mentions": {
+                  "parse": ["everyone"]
+              }
           }
 
+          print("Sending notice to Discord...")
+
           with open(filename, "rb") as f:
+
               response = requests.post(
+
                   WEBHOOK,
-                  data={"payload_json": json.dumps(message)},
+
+                  data={
+                      "payload_json":
+                      json.dumps(message)
+                  },
+
                   files={
                       "files[0]": (
                           filename,
@@ -101,20 +290,35 @@ jobs:
                           "application/pdf"
                       )
                   },
-                  timeout=60
+
+                  timeout=120
               )
 
           response.raise_for_status()
 
-          open(STATE, "w").write(pdf_url)
+          print(
+              "PDF successfully sent to Discord!"
+          )
 
-          print("PDF successfully sent to Discord.")
+          # ---------------------------------------
+          # SAVE NEW STATE
+          # ---------------------------------------
+
+          with open(STATE, "w") as f:
+              f.write(pdf_url)
+
+          print("Notice state updated.")
+
           PY
 
       - name: Save notice state
         run: |
           git config user.name "College Notice Bot"
           git config user.email "actions@github.com"
+
           git add last_notice.txt
-          git diff --cached --quiet || git commit -m "Update latest college notice"
+
+          git diff --cached --quiet || \
+            git commit -m "Update latest college notice"
+
           git push
