@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Get repository files
+      - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Install required packages
+      - name: Install OCR tools
         run: |
           sudo apt-get update
           sudo apt-get install -y poppler-utils tesseract-ocr
@@ -27,35 +27,30 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           python3 <<'PY'
+          import os
+          import re
+          import json
+          import time
+          import glob
+          import subprocess
           import requests
           from bs4 import BeautifulSoup
           from urllib.parse import urljoin
-          import os
-          import json
-          import time
-          import re
-          import subprocess
-          import glob
 
           PAGE = "https://www.suryasencollege.org.in/new_2020_GeneralNotice.php"
           STATE = "last_notice.txt"
           WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 
-          # -----------------------------------------
-          # CONNECT TO COLLEGE WEBSITE
-          # -----------------------------------------
-
+          # Get website
           html = None
 
           for attempt in range(1, 6):
               try:
-                  print(f"Connecting to college website: {attempt}/5")
+                  print("Website attempt", attempt, "of 5")
 
                   r = requests.get(
                       PAGE,
-                      headers={
-                          "User-Agent": "Mozilla/5.0"
-                      },
+                      headers={"User-Agent": "Mozilla/5.0"},
                       timeout=60
                   )
 
@@ -66,7 +61,7 @@ jobs:
                   break
 
               except Exception as e:
-                  print("Connection error:", e)
+                  print("Website error:", e)
 
                   if attempt < 5:
                       time.sleep(attempt * 10)
@@ -75,10 +70,7 @@ jobs:
               print("Could not connect to college website.")
               raise SystemExit(1)
 
-          # -----------------------------------------
-          # FIND PDF NOTICES
-          # -----------------------------------------
-
+          # Find PDF notices
           soup = BeautifulSoup(html, "html.parser")
           notices = []
 
@@ -90,17 +82,16 @@ jobs:
               if ".pdf" not in href.lower():
                   continue
 
-              pdf_url = urljoin(PAGE, href)
-
-              date_match = re.search(
-                  r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})',
+              match = re.search(
+                  r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})",
                   text
               )
 
-              if not date_match:
+              if not match:
                   continue
 
-              date_text = date_match.group(0)
+              pdf_url = urljoin(PAGE, href)
+              date_text = match.group(0)
 
               notices.append(
                   (date_text, text, pdf_url)
@@ -110,23 +101,14 @@ jobs:
               print("No PDF notices found.")
               raise SystemExit(1)
 
-          # -----------------------------------------
-          # COLLEGE PAGE LISTS NEWEST NOTICE FIRST
-          # -----------------------------------------
-
+          # Website lists newest notice first
           date_text, title, pdf_url = notices[0]
 
-          print("")
-          print("LATEST NOTICE")
-          print("Date:", date_text)
-          print("Title:", title)
-          print("PDF:", pdf_url)
-          print("")
+          print("Latest notice date:", date_text)
+          print("Latest notice title:", title)
+          print("Latest PDF:", pdf_url)
 
-          # -----------------------------------------
-          # CHECK PREVIOUS NOTICE
-          # -----------------------------------------
-
+          # Check state
           old = ""
 
           if os.path.exists(STATE):
@@ -137,35 +119,25 @@ jobs:
               print("No new notice.")
               raise SystemExit(0)
 
-          print("NEW NOTICE FOUND!")
+          print("New notice detected.")
 
-          # -----------------------------------------
-          # DOWNLOAD PDF
-          # -----------------------------------------
-
+          # Download PDF
           pdf_data = None
 
           for attempt in range(1, 6):
               try:
-                  print(f"Downloading PDF: {attempt}/5")
+                  print("PDF download attempt", attempt, "of 5")
 
                   r = requests.get(
                       pdf_url,
-                      headers={
-                          "User-Agent": "Mozilla/5.0"
-                      },
+                      headers={"User-Agent": "Mozilla/5.0"},
                       timeout=90
                   )
 
                   r.raise_for_status()
                   pdf_data = r.content
 
-                  print(
-                      "PDF downloaded:",
-                      len(pdf_data),
-                      "bytes"
-                  )
-
+                  print("PDF downloaded successfully.")
                   break
 
               except Exception as e:
@@ -178,8 +150,7 @@ jobs:
               print("Could not download PDF.")
               raise SystemExit(1)
 
-          filename = pdf_url.split("/")[-1]
-          filename = filename.split("?")[0]
+          filename = pdf_url.split("/")[-1].split("?")[0]
 
           if not filename.lower().endswith(".pdf"):
               filename = "college_notice.pdf"
@@ -187,19 +158,13 @@ jobs:
           with open(filename, "wb") as f:
               f.write(pdf_data)
 
-          print("PDF saved as:", filename)
+          print("PDF saved:", filename)
 
-          # -----------------------------------------
           # OCR
-          # -----------------------------------------
-
           notice_number = "Not detected"
 
           try:
-              print("")
-              print("Starting OCR...")
-
-              prefix = "notice_page"
+              print("Starting OCR.")
 
               subprocess.run(
                   [
@@ -209,28 +174,22 @@ jobs:
                       "-r", "300",
                       "-png",
                       filename,
-                      prefix
+                      "notice_page"
                   ],
                   check=True
               )
 
               images = sorted(
-                  glob.glob(prefix + "-*.png")
+                  glob.glob("notice_page-*.png")
               )
 
-              print(
-                  "PDF pages converted:",
-                  len(images)
-              )
+              print("Pages converted:", len(images))
 
               ocr_text = ""
 
               for image in images:
 
-                  print(
-                      "Running OCR on:",
-                      image
-                  )
+                  print("OCR:", image)
 
                   result = subprocess.run(
                       [
@@ -245,23 +204,14 @@ jobs:
                   )
 
                   page_text = result.stdout
-
                   ocr_text += "\n" + page_text
 
-                  print(
-                      "OCR text:",
-                      page_text[:1000]
-                  )
-
-              # -------------------------------------
-              # FIND NOTICE NUMBER
-              # -------------------------------------
-
+              # Search for Notice No.
               patterns = [
-                  r'Notice\s*No\.?\s*[:\-]?\s*(\d{1,4})',
-                  r'Notice\s*Number\s*[:\-]?\s*(\d{1,4})',
-                  r'NOTICE\s*NO\.?\s*[:\-]?\s*(\d{1,4})',
-                  r'NO\.?\s*[:\-]\s*(\d{1,4})'
+                  r"Notice\s*No\.?\s*[:\-]?\s*(\d{1,4})",
+                  r"Notice\s*Number\s*[:\-]?\s*(\d{1,4})",
+                  r"NOTICE\s*NO\.?\s*[:\-]?\s*(\d{1,4})",
+                  r"NO\.?\s*[:\-]\s*(\d{1,4})"
               ]
 
               for pattern in patterns:
@@ -276,19 +226,71 @@ jobs:
                       notice_number = match.group(1)
                       break
 
-              print(
-                  "Detected Notice Number:",
-                  notice_number
-              )
+              print("Detected Notice Number:", notice_number)
 
-              # Delete temporary images
-
+              # Remove temporary images
               for image in images:
                   try:
                       os.remove(image)
-                  except:
+                  except Exception:
                       pass
 
           except Exception as e:
-              print("OCR error:", e)
-              print("Continuing without
+              print("OCR failed:", e)
+              print("Continuing without notice number.")
+
+          # Discord message
+          message = {
+              "content": (
+                  "@everyone\n"
+                  "📢 **NEW COLLEGE NOTICE**\n"
+                  f"🔢 **Notice No.: {notice_number}**\n"
+                  f"📅 **Date: {date_text}**\n"
+                  f"📄 **{title}**"
+              ),
+              "allowed_mentions": {
+                  "parse": ["everyone"]
+              }
+          }
+
+          print("Sending notice to Discord.")
+
+          with open(filename, "rb") as f:
+
+              discord_response = requests.post(
+                  WEBHOOK,
+                  data={
+                      "payload_json": json.dumps(message)
+                  },
+                  files={
+                      "files[0]": (
+                          filename,
+                          f,
+                          "application/pdf"
+                      )
+                  },
+                  timeout=120
+              )
+
+          discord_response.raise_for_status()
+
+          print("PDF successfully sent to Discord.")
+
+          # Save state
+          with open(STATE, "w") as f:
+              f.write(pdf_url)
+
+          print("Notice state updated.")
+
+          PY
+
+      - name: Save notice state
+        run: |
+          git config user.name "College Notice Bot"
+          git config user.email "actions@github.com"
+
+          git add last_notice.txt
+
+          git diff --cached --quiet || git commit -m "Update latest college notice"
+
+          git push
