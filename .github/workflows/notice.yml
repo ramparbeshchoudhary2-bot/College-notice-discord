@@ -3,7 +3,14 @@ name: College Notice to Discord
 on:
   schedule:
     - cron: "*/5 * * * *"
+
   workflow_dispatch:
+    inputs:
+      test_latest:
+        description: "Send the current latest notice as a test"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -16,15 +23,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Install OCR tools
+      - name: Install required tools
         run: |
           sudo apt-get update
           sudo apt-get install -y poppler-utils tesseract-ocr
-          pip install requests beautifulsoup4
+          python3 -m pip install --upgrade requests beautifulsoup4
 
-      - name: Check for new college notice
+      - name: Check college notice
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          TEST_LATEST: ${{ github.event_name == 'workflow_dispatch' && inputs.test_latest == true }}
         run: |
           python3 <<'PY'
           import os
@@ -39,132 +47,437 @@ jobs:
 
           PAGE = "https://www.suryasencollege.org.in/new_2020_GeneralNotice.php"
           STATE = "last_notice.txt"
-          WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 
-          # Get website
+          WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "").strip()
+          TEST_LATEST = os.environ.get("TEST_LATEST", "false").lower() == "true"
+
+          if not WEBHOOK:
+              print("ERROR: DISCORD_WEBHOOK secret is missing.")
+              raise SystemExit(1)
+
+          print("========================================")
+          print("College Notice to Discord")
+          print("========================================")
+
+          if TEST_LATEST:
+              print("TEST MODE: ON")
+              print("The latest notice will be sent even if already processed.")
+          else:
+              print("NORMAL MODE: ON")
+
+          # ---------------------------------------------------------
+          # Download college website
+          # ---------------------------------------------------------
+
           html = None
 
           for attempt in range(1, 6):
               try:
-                  print("Website attempt", attempt, "of 5")
+                  print(f"Website attempt {attempt} of 5")
 
-                  r = requests.get(
+                  response = requests.get(
                       PAGE,
-                      headers={"User-Agent": "Mozilla/5.0"},
+                      headers={
+                          "User-Agent": (
+                              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 Chrome/140 Safari/537.36"
+                          )
+                      },
                       timeout=60
                   )
 
-                  r.raise_for_status()
-                  html = r.text
+                  response.raise_for_status()
+                  html = response.text
 
                   print("Website connected successfully.")
+                  print("Website HTML size:", len(html))
+
                   break
 
-              except Exception as e:
-                  print("Website error:", e)
+              except Exception as error:
+                  print("Website error:", error)
 
                   if attempt < 5:
-                      time.sleep(attempt * 10)
+                      wait_time = attempt * 10
+                      print(f"Waiting {wait_time} seconds...")
+                      time.sleep(wait_time)
 
           if html is None:
-              print("Could not connect to college website.")
+              print("ERROR: Could not connect to college website.")
               raise SystemExit(1)
 
-          # Find PDF notices
+          # ---------------------------------------------------------
+          # Find GENERAL NOTICE section
+          # ---------------------------------------------------------
+
           soup = BeautifulSoup(html, "html.parser")
-          notices = []
 
-          for a in soup.find_all("a", href=True):
+          heading = None
 
-              text = a.get_text(" ", strip=True)
-              href = a.get("href", "").strip()
+          for element in soup.find_all(
+              ["h1", "h2", "h3", "h4", "h5", "h6", "div", "p", "strong"]
+          ):
+              text = element.get_text(" ", strip=True).upper()
 
-              if ".pdf" not in href.lower():
-                  continue
-
-              match = re.search(
-                  r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})",
-                  text
-              )
-
-              if not match:
-                  continue
-
-              pdf_url = urljoin(PAGE, href)
-              date_text = match.group(0)
-
-              notices.append(
-                  (date_text, text, pdf_url)
-              )
-
-          if not notices:
-              print("No PDF notices found.")
-              raise SystemExit(1)
-
-          # Website lists newest notice first
-          date_text, title, pdf_url = notices[0]
-
-          print("Latest notice date:", date_text)
-          print("Latest notice title:", title)
-          print("Latest PDF:", pdf_url)
-
-          # Check state
-          old = ""
-
-          if os.path.exists(STATE):
-              with open(STATE, "r") as f:
-                  old = f.read().strip()
-
-          if old == pdf_url:
-              print("No new notice.")
-              raise SystemExit(0)
-
-          print("New notice detected.")
-
-          # Download PDF
-          pdf_data = None
-
-          for attempt in range(1, 6):
-              try:
-                  print("PDF download attempt", attempt, "of 5")
-
-                  r = requests.get(
-                      pdf_url,
-                      headers={"User-Agent": "Mozilla/5.0"},
-                      timeout=90
-                  )
-
-                  r.raise_for_status()
-                  pdf_data = r.content
-
-                  print("PDF downloaded successfully.")
+              if text == "GENERAL NOTICE":
+                  heading = element
                   break
 
-              except Exception as e:
-                  print("PDF download error:", e)
+          if heading is not None:
+              print("GENERAL NOTICE section found.")
+          else:
+              print("GENERAL NOTICE heading not found.")
+              print("Using full page as fallback.")
 
-                  if attempt < 5:
-                      time.sleep(attempt * 10)
+          # ---------------------------------------------------------
+          # Collect possible notice entries
+          # ---------------------------------------------------------
 
-          if pdf_data is None:
-              print("Could not download PDF.")
+          date_pattern = re.compile(
+              r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b"
+          )
+
+          candidates = []
+
+          # First try links because notice entries are links.
+          for link in soup.find_all("a", href=True):
+
+              text = link.get_text(" ", strip=True)
+
+              date_match = date_pattern.search(text)
+
+              if not date_match:
+                  continue
+
+              # Only accept dates in the general notice area when
+              # possible.
+              if heading is not None:
+
+                  try:
+                      # Check whether the link appears after the
+                      # GENERAL NOTICE heading in document order.
+                      elements = list(soup.find_all(True))
+                      heading_index = elements.index(heading)
+                      link_index = elements.index(link)
+
+                      if link_index < heading_index:
+                          continue
+
+                  except Exception:
+                      pass
+
+              date_text = date_match.group(0)
+
+              day = int(date_match.group(1))
+              month = int(date_match.group(2))
+              year = int(date_match.group(3))
+
+              if not (1 <= day <= 31 and 1 <= month <= 12):
+                  continue
+
+              href = link.get("href", "").strip()
+
+              # Collect every possible URL-like value from the link.
+              possible_urls = []
+
+              if href:
+                  possible_urls.append(href)
+
+              for attribute_name, attribute_value in link.attrs.items():
+
+                  if isinstance(attribute_value, list):
+                      attribute_value = " ".join(attribute_value)
+
+                  if not isinstance(attribute_value, str):
+                      continue
+
+                  possible_urls.append(attribute_value)
+
+              # Search attributes / HTML for PDF paths.
+              link_html = str(link)
+
+              pdf_matches = re.findall(
+                  r"""(?:https?://[^"' ]+|[^"' ]+\.pdf(?:\?[^"' ]*)?)""",
+                  link_html,
+                  flags=re.IGNORECASE
+              )
+
+              possible_urls.extend(pdf_matches)
+
+              pdf_url = None
+
+              for possible in possible_urls:
+
+                  possible = possible.strip()
+
+                  if ".pdf" in possible.lower():
+
+                      # Remove common JavaScript/quote characters.
+                      possible = possible.strip(
+                          "\"'()[]{}"
+                      )
+
+                      match_pdf = re.search(
+                          r"""https?://[^"' )]+\.pdf(?:\?[^"' )]*)?""",
+                          possible,
+                          re.IGNORECASE
+                      )
+
+                      if match_pdf:
+                          pdf_url = match_pdf.group(0)
+                          break
+
+                      match_relative = re.search(
+                          r"""[^"' ()]+\.pdf(?:\?[^"' )]*)?""",
+                          possible,
+                          re.IGNORECASE
+                      )
+
+                      if match_relative:
+                          pdf_url = urljoin(
+                              PAGE,
+                              match_relative.group(0)
+                          )
+                          break
+
+              # If the href itself is a normal URL, keep it as a
+              # possible notice link even when it isn't .pdf.
+              if pdf_url is None and href:
+                  pdf_url = urljoin(PAGE, href)
+
+              candidates.append(
+                  {
+                      "date_text": date_text,
+                      "date": (year, month, day),
+                      "title": text,
+                      "url": pdf_url,
+                      "link_html": link_html
+                  }
+              )
+
+          print("Notice candidates found:", len(candidates))
+
+          # ---------------------------------------------------------
+          # Extra fallback: search raw HTML around dates for PDF paths
+          # ---------------------------------------------------------
+
+          if not candidates:
+
+              print("Normal link scan found no notices.")
+              print("Trying raw HTML fallback.")
+
+              raw_matches = re.finditer(
+                  r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{4}\b",
+                  html
+              )
+
+              for match in raw_matches:
+
+                  date_text = match.group(0)
+
+                  day, month, year = [
+                      int(x)
+                      for x in re.split(r"[-/.]", date_text)
+                  ]
+
+                  if not (
+                      1 <= day <= 31
+                      and 1 <= month <= 12
+                      and 2000 <= year <= 2100
+                  ):
+                      continue
+
+                  start = max(0, match.start() - 1000)
+                  end = min(len(html), match.end() + 2000)
+
+                  surrounding = html[start:end]
+
+                  pdf_match = re.search(
+                      r"""(?:https?://[^"' <]+|[^"' <]+/)[^"' <]*\.pdf(?:\?[^"' <]*)?""",
+                      surrounding,
+                      re.IGNORECASE
+                  )
+
+                  if pdf_match:
+
+                      pdf_url = pdf_match.group(0)
+
+                      pdf_url = pdf_url.strip(
+                          "\"'()[]{}"
+                      )
+
+                      pdf_url = urljoin(PAGE, pdf_url)
+
+                      clean_text = BeautifulSoup(
+                          surrounding,
+                          "html.parser"
+                      ).get_text(" ", strip=True)
+
+                      candidates.append(
+                          {
+                              "date_text": date_text,
+                              "date": (year, month, day),
+                              "title": clean_text,
+                              "url": pdf_url,
+                              "link_html": surrounding
+                          }
+                      )
+
+          if not candidates:
+              print("ERROR: No college notice entries found.")
+              print("The website format may have changed.")
               raise SystemExit(1)
 
-          filename = pdf_url.split("/")[-1].split("?")[0]
+          # ---------------------------------------------------------
+          # Remove obvious non-notice links and invalid candidates
+          # ---------------------------------------------------------
 
-          if not filename.lower().endswith(".pdf"):
-              filename = "college_notice.pdf"
+          valid_candidates = []
 
-          with open(filename, "wb") as f:
-              f.write(pdf_data)
+          for item in candidates:
 
-          print("PDF saved:", filename)
+              title = item["title"].strip()
 
-          # OCR
+              if len(title) < 8:
+                  continue
+
+              valid_candidates.append(item)
+
+          if not valid_candidates:
+              print("ERROR: Notice entries were found but none were valid.")
+              raise SystemExit(1)
+
+          candidates = valid_candidates
+
+          # ---------------------------------------------------------
+          # Select latest notice
+          # ---------------------------------------------------------
+
+          candidates.sort(
+              key=lambda item: item["date"],
+              reverse=True
+          )
+
+          latest = candidates[0]
+
+          date_text = latest["date_text"]
+          title = latest["title"]
+          pdf_url = latest["url"]
+
+          print("----------------------------------------")
+          print("LATEST NOTICE")
+          print("Date:", date_text)
+          print("Title:", title)
+          print("Initial link:", pdf_url)
+          print("----------------------------------------")
+
+          # ---------------------------------------------------------
+          # Try to turn the link into an actual PDF
+          # ---------------------------------------------------------
+
+          pdf_data = None
+          final_pdf_url = None
+
+          urls_to_try = []
+
+          if pdf_url:
+              urls_to_try.append(pdf_url)
+
+          # Extract additional PDF URLs from the original HTML.
+          for match in re.findall(
+              r"""(?:https?://[^"' <]+|[^"' <]+)[^\s"'<>]*\.pdf(?:\?[^\s"'<>]*)?""",
+              latest["link_html"],
+              flags=re.IGNORECASE
+          ):
+
+              candidate_url = urljoin(PAGE, match)
+
+              if candidate_url not in urls_to_try:
+                  urls_to_try.append(candidate_url)
+
+          # Try the direct PDF URLs first.
+          for url in urls_to_try:
+
+              if not url:
+                  continue
+
+              print("Trying PDF URL:", url)
+
+              try:
+                  pdf_response = requests.get(
+                      url,
+                      headers={
+                          "User-Agent": "Mozilla/5.0"
+                      },
+                      timeout=90,
+                      allow_redirects=True
+                  )
+
+                  pdf_response.raise_for_status()
+
+                  content_type = pdf_response.headers.get(
+                      "content-type",
+                      ""
+                  ).lower()
+
+                  data = pdf_response.content
+
+                  # PDF files normally begin with %PDF.
+                  if data[:4] == b"%PDF" or "application/pdf" in content_type:
+
+                      pdf_data = data
+                      final_pdf_url = pdf_response.url
+
+                      print(
+                          "PDF successfully downloaded:",
+                          len(pdf_data),
+                          "bytes"
+                      )
+
+                      print(
+                          "Final PDF URL:",
+                          final_pdf_url
+                      )
+
+                      break
+
+                  else:
+                      print(
+                          "This URL did not return a PDF."
+                      )
+
+              except Exception as error:
+                  print("PDF URL error:", error)
+
+          if pdf_data is None:
+
+              print("ERROR: Could not obtain the actual PDF.")
+
+              print("The latest notice link was:")
+              print(pdf_url)
+
+              raise SystemExit(1)
+
+          # ---------------------------------------------------------
+          # Save PDF
+          # ---------------------------------------------------------
+
+          filename = "college_notice.pdf"
+
+          with open(filename, "wb") as file:
+              file.write(pdf_data)
+
+          print("PDF saved as:", filename)
+
+          # ---------------------------------------------------------
+          # OCR first few pages
+          # ---------------------------------------------------------
+
           notice_number = "Not detected"
 
           try:
-              print("Starting OCR.")
+
+              print("Starting OCR...")
 
               subprocess.run(
                   [
@@ -176,20 +489,23 @@ jobs:
                       filename,
                       "notice_page"
                   ],
-                  check=True
+                  check=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  text=True
               )
 
               images = sorted(
                   glob.glob("notice_page-*.png")
               )
 
-              print("Pages converted:", len(images))
+              print("Pages converted for OCR:", len(images))
 
               ocr_text = ""
 
               for image in images:
 
-                  print("OCR:", image)
+                  print("OCR processing:", image)
 
                   result = subprocess.run(
                       [
@@ -203,22 +519,44 @@ jobs:
                       text=True
                   )
 
-                  page_text = result.stdout
-                  ocr_text += "\n" + page_text
+                  ocr_text += "\n" + result.stdout
 
-              # Search for Notice No.
+                  # Second OCR mode can sometimes read layouts
+                  # differently.
+                  result2 = subprocess.run(
+                      [
+                          "tesseract",
+                          image,
+                          "stdout",
+                          "--psm",
+                          "11"
+                      ],
+                      capture_output=True,
+                      text=True
+                  )
+
+                  ocr_text += "\n" + result2.stdout
+
+              # Normalize common OCR mistakes.
+              normalized = ocr_text
+
+              normalized = re.sub(
+                  r"(?i)notice\s*n[o0]\.?",
+                  "Notice No.",
+                  normalized
+              )
+
               patterns = [
-                  r"Notice\s*No\.?\s*[:\-]?\s*(\d{1,4})",
-                  r"Notice\s*Number\s*[:\-]?\s*(\d{1,4})",
-                  r"NOTICE\s*NO\.?\s*[:\-]?\s*(\d{1,4})",
-                  r"NO\.?\s*[:\-]\s*(\d{1,4})"
+                  r"Notice\s*No\.?\s*[:\-]?\s*(\d{1,5})",
+                  r"Notice\s*Number\s*[:\-]?\s*(\d{1,5})",
+                  r"NO\.?\s*[:\-]\s*(\d{1,5})"
               ]
 
               for pattern in patterns:
 
                   match = re.search(
                       pattern,
-                      ocr_text,
+                      normalized,
                       re.IGNORECASE
                   )
 
@@ -226,20 +564,60 @@ jobs:
                       notice_number = match.group(1)
                       break
 
-              print("Detected Notice Number:", notice_number)
+              print(
+                  "Detected Notice Number:",
+                  notice_number
+              )
 
-              # Remove temporary images
+              # Delete temporary OCR images.
               for image in images:
+
                   try:
                       os.remove(image)
                   except Exception:
                       pass
 
-          except Exception as e:
-              print("OCR failed:", e)
-              print("Continuing without notice number.")
+          except Exception as error:
 
-          # Discord message
+              print("OCR failed:", error)
+              print(
+                  "Continuing without notice number."
+              )
+
+          # ---------------------------------------------------------
+          # Check state
+          # ---------------------------------------------------------
+
+          old_url = ""
+
+          if os.path.exists(STATE):
+
+              with open(STATE, "r") as file:
+                  old_url = file.read().strip()
+
+          print("Previously saved PDF:", old_url)
+
+          # ---------------------------------------------------------
+          # Normal mode: don't send already-sent notice
+          # Test mode: ALWAYS send latest notice
+          # ---------------------------------------------------------
+
+          if not TEST_LATEST:
+
+              if old_url == final_pdf_url:
+                  print("No new notice.")
+                  print("The latest notice was already sent.")
+                  raise SystemExit(0)
+
+          else:
+
+              print("TEST MODE: Ignoring saved state.")
+              print("Sending the latest notice now.")
+
+          # ---------------------------------------------------------
+          # Prepare Discord message
+          # ---------------------------------------------------------
+
           message = {
               "content": (
                   "@everyone\n"
@@ -253,9 +631,9 @@ jobs:
               }
           }
 
-          print("Sending notice to Discord.")
+          print("Sending notice to Discord...")
 
-          with open(filename, "rb") as f:
+          with open(filename, "rb") as file:
 
               discord_response = requests.post(
                   WEBHOOK,
@@ -264,23 +642,50 @@ jobs:
                   },
                   files={
                       "files[0]": (
-                          filename,
-                          f,
+                          "college_notice.pdf",
+                          file,
                           "application/pdf"
                       )
                   },
                   timeout=120
               )
 
-          discord_response.raise_for_status()
+          print(
+              "Discord HTTP status:",
+              discord_response.status_code
+          )
 
+          if not discord_response.ok:
+
+              print(
+                  "Discord response:",
+                  discord_response.text
+              )
+
+              discord_response.raise_for_status()
+
+          print("========================================")
           print("PDF successfully sent to Discord.")
+          print("========================================")
 
-          # Save state
-          with open(STATE, "w") as f:
-              f.write(pdf_url)
+          # ---------------------------------------------------------
+          # Update state ONLY in normal mode
+          # ---------------------------------------------------------
 
-          print("Notice state updated.")
+          if TEST_LATEST:
+
+              print(
+                  "TEST MODE: Saved state was NOT changed."
+              )
+
+          else:
+
+              with open(STATE, "w") as file:
+                  file.write(final_pdf_url)
+
+              print(
+                  "Notice state updated."
+              )
 
           PY
 
