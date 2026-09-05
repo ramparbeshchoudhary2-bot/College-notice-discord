@@ -47,20 +47,21 @@ jobs:
               ),
               "Accept": (
                   "text/html,application/xhtml+xml,"
-                  "application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+                  "application/xml;q=0.9,image/avif,image/webp,"
+                  "*/*;q=0.8"
               ),
               "Accept-Language": "en-US,en;q=0.9",
               "Connection": "keep-alive"
           }
 
           # ============================================================
-          # GET COLLEGE WEBSITE
+          # CONNECT TO COLLEGE WEBSITE
           # ============================================================
-
-          html = None
 
           session = requests.Session()
           session.headers.update(HEADERS)
+
+          html = None
 
           for attempt in range(1, 4):
 
@@ -76,9 +77,6 @@ jobs:
                   print("HTTP status:", response.status_code)
 
                   response.raise_for_status()
-
-                  if len(response.text) < 1000:
-                      raise Exception("Website returned unusually small HTML")
 
                   html = response.text
 
@@ -105,53 +103,33 @@ jobs:
                   time.sleep(wait)
 
           if html is None:
+
               print("")
-              print("==============================================")
+              print("==========================================")
               print("COLLEGE WEBSITE COULD NOT BE REACHED")
-              print("==============================================")
-              print("")
-              print("GitHub Actions cannot currently connect")
-              print("to the college server.")
-              print("")
-              print("This is NOT a Discord webhook problem.")
-              print("This is NOT a PDF parser problem.")
-              print("")
+              print("==========================================")
+
               sys.exit(1)
 
           # ============================================================
-          # PARSE PAGE
+          # PARSE HTML
           # ============================================================
 
           soup = BeautifulSoup(html, "html.parser")
 
-          notices = []
+          print("")
+          print("Page title:")
 
-          # Find GENERAL NOTICE heading
-          heading = None
-
-          for tag in soup.find_all(
-              ["h1", "h2", "h3", "h4", "h5", "h6"]
-          ):
-              text = tag.get_text(" ", strip=True).upper()
-
-              if "GENERAL NOTICE" in text:
-                  heading = tag
-                  break
-
-          if heading:
-              print("GENERAL NOTICE section found.")
+          if soup.title:
+              print(soup.title.get_text(" ", strip=True))
           else:
-              print("GENERAL NOTICE heading not found.")
+              print("No title")
 
           # ============================================================
-          # FIND ALL PDF LINKS
+          # FIND PDF LINKS
           # ============================================================
 
-          # We first collect every PDF link on the page.
-          # This is more reliable than requiring the date
-          # to be inside the <a> element.
-
-          all_pdf_links = []
+          pdf_links = []
 
           for a in soup.find_all("a", href=True):
 
@@ -160,184 +138,258 @@ jobs:
               if not href:
                   continue
 
-              if ".pdf" not in href.lower():
-                  continue
+              full_url = urljoin(PAGE, href)
 
-              pdf_url = urljoin(PAGE, href)
-
-              link_text = a.get_text(
+              text = a.get_text(
                   " ",
                   strip=True
               )
 
-              # Look at the parent/container text too.
-              parent_text = ""
+              # Accept normal PDF links
+              if ".pdf" in href.lower():
 
-              if a.parent:
-                  parent_text = a.parent.get_text(
+                  pdf_links.append(
+                      {
+                          "text": text,
+                          "url": full_url
+                      }
+                  )
+
+          print("")
+          print("PDF links found:", len(pdf_links))
+
+          # ============================================================
+          # SHOW ALL LINKS IF PDF LINKS ARE NOT FOUND
+          # ============================================================
+
+          if not pdf_links:
+
+              print("")
+              print("No direct PDF links found.")
+              print("Checking all links on the page...")
+              print("")
+
+              for a in soup.find_all("a", href=True):
+
+                  text = a.get_text(
                       " ",
                       strip=True
                   )
 
-              combined_text = (
-                  parent_text + " " + link_text
-              )
+                  href = a.get(
+                      "href",
+                      ""
+                  ).strip()
 
-              all_pdf_links.append(
-                  (
-                      a,
-                      combined_text,
-                      pdf_url
+                  print(
+                      "LINK:",
+                      text[:150],
+                      "|",
+                      href
                   )
-              )
-
-          print("PDF links found:", len(all_pdf_links))
 
           # ============================================================
-          # EXTRACT NOTICE DATE + TITLE
+          # FIND DATES
           # ============================================================
 
           date_pattern = re.compile(
-              r"\b(\d{2})[-/.](\d{2})[-/.](\d{4})\b"
+              r"\b"
+              r"(\d{1,2})"
+              r"[-/.]"
+              r"(\d{1,2})"
+              r"[-/.]"
+              r"(\d{4})"
+              r"\b"
           )
 
-          for a, combined_text, pdf_url in all_pdf_links:
+          notices = []
 
-              match = date_pattern.search(combined_text)
+          for item in pdf_links:
+
+              text = item["text"]
+              pdf_url = item["url"]
+
+              match = date_pattern.search(text)
+
+              # If date isn't inside link text,
+              # inspect the surrounding HTML element.
+
+              if not match:
+
+                  for parent in soup.find_all(
+                      string=lambda s:
+                      s and pdf_url.split("/")[-1] in str(s)
+                  ):
+
+                      parent_text = parent.parent.get_text(
+                          " ",
+                          strip=True
+                      )
+
+                      match = date_pattern.search(
+                          parent_text
+                      )
+
+                      if match:
+                          text = parent_text
+                          break
 
               if not match:
                   continue
 
-              date_text = match.group(0)
+              day = int(match.group(1))
+              month = int(match.group(2))
+              year = int(match.group(3))
 
-              # Get the visible text around the link.
-              clean_text = re.sub(
-                  r"\s+",
-                  " ",
-                  combined_text
-              ).strip()
+              date_text = (
+                  f"{day:02d}-{month:02d}-{year}"
+              )
 
-              # Remove date
+              title = text
+
               title = date_pattern.sub(
                   "",
-                  clean_text,
-                  count=1
-              ).strip()
+                  title
+              )
 
-              # Remove common website text
               title = re.sub(
-                  r"click\s+to\s+view",
+                  r"click\s+here|click\s+to\s+view|view\s+notice",
                   "",
                   title,
                   flags=re.IGNORECASE
+              )
+
+              title = re.sub(
+                  r"\s+",
+                  " ",
+                  title
               ).strip()
 
               if not title:
                   title = "College Notice"
 
               notices.append(
-                  (
-                      date_text,
-                      title,
-                      pdf_url
-                  )
+                  {
+                      "date": date_text,
+                      "day": day,
+                      "month": month,
+                      "year": year,
+                      "title": title,
+                      "url": pdf_url
+                  }
               )
 
           # ============================================================
-          # REMOVE DUPLICATES
+          # FALLBACK:
+          # PDF LINK WITHOUT DATE IN TEXT
           # ============================================================
 
-          unique = []
+          if not notices and pdf_links:
 
-          seen = set()
+              print("")
+              print(
+                  "PDFs were found but dates were not detected."
+              )
 
-          for notice in notices:
+              print(
+                  "Using the first PDF as the latest notice."
+              )
 
-              key = notice[2]
+              first = pdf_links[0]
 
-              if key in seen:
-                  continue
-
-              seen.add(key)
-              unique.append(notice)
-
-          notices = unique
-
-          print("Notices detected:", len(notices))
+              notices.append(
+                  {
+                      "date": "Unknown date",
+                      "day": 0,
+                      "month": 0,
+                      "year": 0,
+                      "title": (
+                          first["text"]
+                          if first["text"]
+                          else "College Notice"
+                      ),
+                      "url": first["url"]
+                  }
+              )
 
           # ============================================================
-          # FALLBACK DEBUG
+          # IF NOTHING FOUND
           # ============================================================
 
           if not notices:
 
               print("")
-              print("Could not detect notices.")
-              print("Saving page for debugging...")
+              print("==========================================")
+              print("NO NOTICE/PDF COULD BE DETECTED")
+              print("==========================================")
+              print("")
 
-              with open("debug_page.html", "w", encoding="utf-8") as f:
+              print("Saving HTML for debugging...")
+
+              with open(
+                  "debug_page.html",
+                  "w",
+                  encoding="utf-8"
+              ) as f:
+
                   f.write(html)
 
-              print("debug_page.html created.")
+              print(
+                  "debug_page.html created."
+              )
+
+              print("")
+              print("========== PAGE TEXT ==========")
+
+              page_text = soup.get_text(
+                  " ",
+                  strip=True
+              )
+
+              print(
+                  page_text[:12000]
+              )
+
+              print("")
+              print("========== END PAGE TEXT ==========")
 
               sys.exit(1)
 
           # ============================================================
-          # SHOW DETECTED NOTICES
+          # SORT NEWEST FIRST
           # ============================================================
 
-          print("")
-          print("===== DETECTED NOTICES =====")
-
-          for i, notice in enumerate(notices[:10], 1):
-
-              print(
-                  f"{i}. {notice[0]} | "
-                  f"{notice[1]} | "
-                  f"{notice[2]}"
-              )
-
-          print("============================")
-          print("")
-
-          # ============================================================
-          # DETERMINE LATEST NOTICE
-          # ============================================================
-
-          def convert_date(date_string):
-
-              match = re.search(
-                  r"(\d{2})[-/.](\d{2})[-/.](\d{4})",
-                  date_string
-              )
-
-              if not match:
-                  return (0, 0, 0)
-
-              day = int(match.group(1))
-              month = int(match.group(2))
-              year = int(match.group(3))
-
-              return (year, month, day)
-
-          # Sort newest first
           notices.sort(
-              key=lambda x: convert_date(x[0]),
+              key=lambda x: (
+                  x["year"],
+                  x["month"],
+                  x["day"]
+              ),
               reverse=True
           )
 
-          date_text, title, pdf_url = notices[0]
+          latest = notices[0]
+
+          date_text = latest["date"]
+          title = latest["title"]
+          pdf_url = latest["url"]
+
+          # ============================================================
+          # SHOW DETECTED NOTICE
+          # ============================================================
 
           print("")
-          print("===== LATEST COLLEGE NOTICE =====")
-          print("Date:", date_text)
+          print("==========================================")
+          print("LATEST COLLEGE NOTICE")
+          print("==========================================")
+          print("Date :", date_text)
           print("Title:", title)
-          print("PDF:", pdf_url)
-          print("=================================")
+          print("PDF  :", pdf_url)
+          print("==========================================")
           print("")
 
           # ============================================================
-          # CHECK PREVIOUS NOTICE
+          # CHECK STATE
           # ============================================================
 
           old = ""
@@ -366,17 +418,11 @@ jobs:
 
                   f.write(pdf_url)
 
-              print(
-                  "First run completed."
-              )
-
-              print(
-                  "Current notice saved."
-              )
-
-              print(
-                  "No Discord message sent."
-              )
+              print("")
+              print("FIRST RUN")
+              print("Current notice saved.")
+              print("No Discord message sent.")
+              print("")
 
               sys.exit(0)
 
@@ -394,9 +440,9 @@ jobs:
           # ============================================================
 
           print("")
-          print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-          print("       NEW NOTICE FOUND")
-          print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+          print("==========================================")
+          print("NEW NOTICE FOUND!")
+          print("==========================================")
           print("")
 
           # ============================================================
@@ -427,8 +473,9 @@ jobs:
                   pdf_response.raise_for_status()
 
                   if len(pdf_response.content) < 100:
+
                       raise Exception(
-                          "Downloaded file is too small"
+                          "Downloaded file is too small."
                       )
 
                   pdf_data = pdf_response.content
@@ -467,49 +514,60 @@ jobs:
           filename = filename.split("?")[0]
 
           if not filename.lower().endswith(".pdf"):
+
               filename = "college_notice.pdf"
 
-          # Remove unsafe filename characters
           filename = re.sub(
               r"[^A-Za-z0-9._-]",
               "_",
               filename
           )
 
-          with open(filename, "wb") as f:
+          with open(
+              filename,
+              "wb"
+          ) as f:
+
               f.write(pdf_data)
 
           print(
-              "Saved PDF as:",
+              "PDF saved as:",
               filename
           )
 
           # ============================================================
-          # SEND TO DISCORD
+          # SEND PDF TO DISCORD
           # ============================================================
 
           message = {
+
               "content": (
-                  "@everyone\n"
+                  "@everyone\n\n"
                   "📢 **NEW COLLEGE NOTICE**\n"
                   f"📅 **{date_text}**\n"
                   f"📄 **{title}**"
               ),
+
               "allowed_mentions": {
                   "parse": ["everyone"]
               }
           }
 
+          print("")
           print("Sending PDF to Discord...")
 
-          with open(filename, "rb") as f:
+          with open(
+              filename,
+              "rb"
+          ) as f:
 
               discord_response = requests.post(
 
                   WEBHOOK,
 
                   data={
-                      "payload_json": json.dumps(message)
+                      "payload_json":
+                      json.dumps(message)
                   },
 
                   files={
@@ -531,14 +589,13 @@ jobs:
           discord_response.raise_for_status()
 
           print("")
-          print("================================")
+          print("==========================================")
           print("SUCCESS!")
-          print("PDF sent to Discord.")
-          print("================================")
-          print("")
+          print("PDF SENT TO DISCORD")
+          print("==========================================")
 
           # ============================================================
-          # SAVE NEWEST NOTICE
+          # UPDATE STATE
           # ============================================================
 
           with open(
@@ -549,7 +606,9 @@ jobs:
 
               f.write(pdf_url)
 
-          print("Notice state updated.")
+          print(
+              "Notice state updated."
+          )
 
           PY
 
