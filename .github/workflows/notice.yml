@@ -51,7 +51,9 @@ jobs:
                   "application/xml;q=0.9,image/avif,image/webp,"
                   "*/*;q=0.8"
               ),
-              "Accept-Language": "en-US,en;q=0.9"
+              "Accept-Language": "en-US,en;q=0.9",
+              "Cache-Control": "no-cache",
+              "Pragma": "no-cache"
           }
 
           session = requests.Session()
@@ -59,44 +61,89 @@ jobs:
 
           html = None
 
-          # --------------------------------------------------
-          # CONNECT TO COLLEGE WEBSITE
-          # --------------------------------------------------
+          # ==================================================
+          # CONNECT TO WEBSITE
+          # ==================================================
 
-          for attempt in range(1, 4):
+          for attempt in range(1, 6):
+
               try:
-                  print(f"Connecting to college website: {attempt}/3")
+                  print(f"Connecting to college website: {attempt}/5")
 
                   response = session.get(
                       PAGE,
-                      timeout=(15, 30),
+                      timeout=(20, 40),
                       allow_redirects=True
                   )
 
                   print("HTTP status:", response.status_code)
+                  print("HTML size:", len(response.text))
+
+                  page_text = response.text.lower()
+
+                  # Detect Cloudflare / browser verification
+                  cloudflare = (
+                      "one moment, please" in page_text
+                      or "cf-chl-" in page_text
+                      or "just a moment" in page_text
+                      or "checking your browser" in page_text
+                      or "verify you are human" in page_text
+                  )
+
+                  if cloudflare:
+
+                      print("")
+                      print("Cloudflare/browser verification detected.")
+                      print("The real college page was not returned.")
+
+                      if attempt < 5:
+                          wait_time = attempt * 10
+                          print(
+                              f"Waiting {wait_time} seconds before retry..."
+                          )
+                          time.sleep(wait_time)
+                          continue
+
+                      print("")
+                      print("College website is still protected by")
+                      print("Cloudflare after 5 attempts.")
+                      print("")
+                      print("SAFE EXIT:")
+                      print("- No Discord message sent.")
+                      print("- last_notice.txt was not changed.")
+                      print("- The bot will try again on the next run.")
+
+                      sys.exit(0)
 
                   response.raise_for_status()
 
                   html = response.text
 
                   print("Website connected successfully.")
-                  print("HTML size:", len(html))
 
                   break
 
               except Exception as e:
+
                   print("Connection error:", e)
 
-                  if attempt < 3:
-                      time.sleep(attempt * 5)
+                  if attempt < 5:
+                      wait_time = attempt * 10
+                      print(
+                          f"Waiting {wait_time} seconds before retry..."
+                      )
+                      time.sleep(wait_time)
 
           if html is None:
-              print("College website could not be reached.")
-              sys.exit(1)
 
-          # --------------------------------------------------
+              print("College website could not be reached.")
+              print("No state change was made.")
+
+              sys.exit(0)
+
+          # ==================================================
           # PARSE PAGE
-          # --------------------------------------------------
+          # ==================================================
 
           soup = BeautifulSoup(html, "html.parser")
 
@@ -108,9 +155,9 @@ jobs:
           else:
               print("Unknown")
 
-          # --------------------------------------------------
+          # ==================================================
           # FIND GENERAL NOTICE SECTION
-          # --------------------------------------------------
+          # ==================================================
 
           print("")
           print("Searching for GENERAL NOTICE section...")
@@ -127,9 +174,6 @@ jobs:
 
           if general_notice_element is None:
 
-              # Sometimes the website puts extra whitespace
-              # or formatting around GENERAL NOTICE.
-
               for element in soup.find_all(string=True):
 
                   text = " ".join(element.split())
@@ -142,24 +186,25 @@ jobs:
 
               print("GENERAL NOTICE section could not be located.")
 
+              # This can happen if the website changes or returns
+              # an incomplete page. Do NOT modify the state file.
+
               with open("debug_page.html", "w", encoding="utf-8") as f:
                   f.write(html)
 
-              sys.exit(1)
+              print("Debug page saved as debug_page.html")
+              print("No Discord message sent.")
+              print("No state change made.")
+
+              sys.exit(0)
 
           print("GENERAL NOTICE section found.")
 
-          # --------------------------------------------------
-          # FIND THE CONTAINER THAT HOLDS THE NOTICE LIST
-          # --------------------------------------------------
-
-          container = general_notice_element
-
-          # Move upward through the DOM until we find a
-          # container containing multiple PDF links.
+          # ==================================================
+          # FIND NOTICE CONTAINER
+          # ==================================================
 
           best_container = None
-
           current = general_notice_element
 
           for level in range(8):
@@ -183,9 +228,9 @@ jobs:
           if best_container is None:
               best_container = general_notice_element.parent
 
-          # --------------------------------------------------
+          # ==================================================
           # COLLECT GENERAL NOTICE PDF LINKS
-          # --------------------------------------------------
+          # ==================================================
 
           notice_links = []
 
@@ -208,10 +253,9 @@ jobs:
                   "text": link_text
               })
 
-          # Remove duplicate URLs while keeping order.
+          # Remove duplicate URLs while preserving order.
 
           unique_links = []
-
           seen = set()
 
           for item in notice_links:
@@ -230,15 +274,14 @@ jobs:
           if not notice_links:
 
               print("No General Notice PDFs found.")
+              print("No Discord message sent.")
+              print("No state change made.")
 
-              with open("debug_page.html", "w", encoding="utf-8") as f:
-                  f.write(html)
+              sys.exit(0)
 
-              sys.exit(1)
-
-          # --------------------------------------------------
-          # SHOW FIRST NOTICES
-          # --------------------------------------------------
+          # ==================================================
+          # DISPLAY FIRST NOTICES
+          # ==================================================
 
           print("")
           print("========== GENERAL NOTICE ENTRIES ==========")
@@ -253,19 +296,18 @@ jobs:
           print("")
           print("============================================")
 
-          # --------------------------------------------------
-          # FIRST GENERAL NOTICE = LATEST NOTICE
-          # --------------------------------------------------
+          # ==================================================
+          # SELECT LATEST NOTICE
+          # ==================================================
 
           latest = notice_links[0]
 
           pdf_url = latest["url"]
-
           notice_text = latest["text"]
 
-          # --------------------------------------------------
+          # ==================================================
           # EXTRACT DATE
-          # --------------------------------------------------
+          # ==================================================
 
           date_pattern = re.compile(
               r"\b"
@@ -284,9 +326,9 @@ jobs:
           else:
               date_text = "Date not available"
 
-          # --------------------------------------------------
+          # ==================================================
           # CLEAN TITLE
-          # --------------------------------------------------
+          # ==================================================
 
           title = notice_text
 
@@ -308,9 +350,9 @@ jobs:
           if not title:
               title = "College Notice"
 
-          # --------------------------------------------------
+          # ==================================================
           # DISPLAY LATEST NOTICE
-          # --------------------------------------------------
+          # ==================================================
 
           print("")
           print("==========================================")
@@ -322,9 +364,9 @@ jobs:
           print("==========================================")
           print("")
 
-          # --------------------------------------------------
-          # READ PREVIOUS STATE
-          # --------------------------------------------------
+          # ==================================================
+          # READ STATE
+          # ==================================================
 
           old = ""
 
@@ -333,9 +375,9 @@ jobs:
               with open(STATE, "r", encoding="utf-8") as f:
                   old = f.read().strip()
 
-          # --------------------------------------------------
+          # ==================================================
           # FIRST RUN
-          # --------------------------------------------------
+          # ==================================================
 
           if not old:
 
@@ -348,15 +390,18 @@ jobs:
 
               sys.exit(0)
 
-          # --------------------------------------------------
-          # CHECK FOR NEW NOTICE
-          # --------------------------------------------------
+          # ==================================================
+          # NO NEW NOTICE
+          # ==================================================
 
           if pdf_url == old:
 
               print("No new notice.")
-
               sys.exit(0)
+
+          # ==================================================
+          # NEW NOTICE
+          # ==================================================
 
           print("")
           print("==========================================")
@@ -364,9 +409,9 @@ jobs:
           print("==========================================")
           print("")
 
-          # --------------------------------------------------
+          # ==================================================
           # DOWNLOAD PDF
-          # --------------------------------------------------
+          # ==================================================
 
           pdf_data = None
 
@@ -378,7 +423,7 @@ jobs:
 
                   pdf_response = session.get(
                       pdf_url,
-                      timeout=(15, 60),
+                      timeout=(20, 60),
                       allow_redirects=True
                   )
 
@@ -389,10 +434,29 @@ jobs:
 
                   pdf_response.raise_for_status()
 
+                  pdf_page = pdf_response.content[:500].lower()
+
+                  if (
+                      b"one moment, please" in pdf_page
+                      or b"just a moment" in pdf_page
+                  ):
+                      raise Exception(
+                          "Cloudflare returned a verification page "
+                          "instead of the PDF."
+                      )
+
                   if len(pdf_response.content) < 100:
 
                       raise Exception(
                           "Downloaded file is too small."
+                      )
+
+                  # Make sure it actually looks like a PDF.
+
+                  if not pdf_response.content.startswith(b"%PDF"):
+
+                      raise Exception(
+                          "Downloaded file does not appear to be a PDF."
                       )
 
                   pdf_data = pdf_response.content
@@ -415,12 +479,14 @@ jobs:
           if pdf_data is None:
 
               print("Could not download PDF.")
+              print("No Discord message sent.")
+              print("State was NOT updated.")
 
               sys.exit(1)
 
-          # --------------------------------------------------
+          # ==================================================
           # SAVE PDF
-          # --------------------------------------------------
+          # ==================================================
 
           filename = (
               pdf_url
@@ -442,9 +508,9 @@ jobs:
 
           print("PDF saved as:", filename)
 
-          # --------------------------------------------------
-          # DISCORD MESSAGE
-          # --------------------------------------------------
+          # ==================================================
+          # SEND TO DISCORD
+          # ==================================================
 
           message = {
 
@@ -497,9 +563,9 @@ jobs:
           print("PDF SENT TO DISCORD")
           print("==========================================")
 
-          # --------------------------------------------------
-          # UPDATE STATE ONLY AFTER SUCCESSFUL SEND
-          # --------------------------------------------------
+          # ==================================================
+          # UPDATE STATE ONLY AFTER SUCCESSFUL DISCORD SEND
+          # ==================================================
 
           with open(STATE, "w", encoding="utf-8") as f:
               f.write(pdf_url)
